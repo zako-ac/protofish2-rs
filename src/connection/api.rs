@@ -255,6 +255,8 @@ impl IncomingProtofishConnection {
             keepalive_interval_ms: self.server_config.keepalive_interval.as_millis() as u32,
         };
 
+        let keepalive_interval = Duration::from_millis(server_hello.keepalive_interval_ms as u64);
+
         framed_send
             .send(ConnectionMessage::ServerHello(server_hello))
             .await?;
@@ -269,6 +271,11 @@ impl IncomingProtofishConnection {
         let quic_clone = conn.clone();
         tokio::spawn(async move {
             router_clone.run(quic_clone).await;
+        });
+
+        let quic_clone_ka = conn.clone();
+        tokio::spawn(async move {
+            keepalive_task(framed_send, framed_recv, keepalive_interval, quic_clone_ka).await;
         });
 
         Ok(ProtofishConnection {
@@ -454,6 +461,12 @@ impl ProtofishClient {
             router_clone.run(quic_clone).await;
         });
 
+        let keepalive_interval = Duration::from_millis(server_hello.keepalive_interval_ms as u64);
+        let quic_clone_ka = conn.clone();
+        tokio::spawn(async move {
+            keepalive_task(framed_send, framed_recv, keepalive_interval, quic_clone_ka).await;
+        });
+
         Ok(ProtofishConnection {
             quic_conn: conn,
             state: Arc::new(RwLock::new(ConnectionState {
@@ -594,5 +607,59 @@ impl ProtofishConnection {
     /// Closes the connection gracefully.
     pub fn close(&self) {
         self.quic_conn.close(quinn::VarInt::from_u32(0), b"");
+    }
+}
+
+async fn keepalive_task(
+    mut send: tokio_util::codec::FramedWrite<quinn::SendStream, ControlStreamCodec>,
+    mut recv: tokio_util::codec::FramedRead<quinn::RecvStream, ControlStreamCodec>,
+    keepalive_interval: Duration,
+    conn: quinn::Connection,
+) {
+    if keepalive_interval.is_zero() {
+        return;
+    }
+
+    let mut timer = tokio::time::interval(keepalive_interval);
+    timer.tick().await; // Initial tick
+    let timeout_duration = keepalive_interval * 3;
+    let mut last_activity = tokio::time::Instant::now();
+
+    loop {
+        tokio::select! {
+            _ = timer.tick() => {
+                if last_activity.elapsed() > timeout_duration {
+                    conn.close(quinn::VarInt::from_u32(1), b"keepalive timeout");
+                    break;
+                }
+                if let Err(_) = send.send(ConnectionMessage::Keepalive).await {
+                    break;
+                }
+            }
+            msg = recv.next() => {
+                match msg {
+                    Some(Ok(ConnectionMessage::Keepalive)) => {
+                        last_activity = tokio::time::Instant::now();
+                        if let Err(_) = send.send(ConnectionMessage::KeepaliveAck).await {
+                            break;
+                        }
+                    }
+                    Some(Ok(ConnectionMessage::KeepaliveAck)) => {
+                        last_activity = tokio::time::Instant::now();
+                    }
+                    Some(Ok(ConnectionMessage::Close)) => {
+                        conn.close(quinn::VarInt::from_u32(0), b"closed by peer");
+                        break;
+                    }
+                    Some(Ok(_)) => {
+                        last_activity = tokio::time::Instant::now();
+                    }
+                    Some(Err(_)) | None => {
+                        conn.close(quinn::VarInt::from_u32(2), b"control stream closed");
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
