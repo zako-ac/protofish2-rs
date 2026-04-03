@@ -50,6 +50,11 @@ pub struct TransferStart {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferCreditsUpdate {
+    pub additional_credits: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferEnd {
     pub final_sequence_number: SequenceNumber,
 }
@@ -87,6 +92,7 @@ pub enum ManiMessage {
     TransferEndAck,
     TransferError(TransferError),
     EndOfStream,
+    TransferCreditsUpdate(TransferCreditsUpdate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,6 +107,7 @@ pub enum ManiMessageType {
     TransferEndAck = 0x06,
     TransferError = 0x07,
     EndOfStream = 0x08,
+    TransferCreditsUpdate = 0x09,
 }
 
 impl ManiMessageType {
@@ -115,6 +122,7 @@ impl ManiMessageType {
             0x06 => Some(ManiMessageType::TransferEndAck),
             0x07 => Some(ManiMessageType::TransferError),
             0x08 => Some(ManiMessageType::EndOfStream),
+            0x09 => Some(ManiMessageType::TransferCreditsUpdate),
             _ => None,
         }
     }
@@ -133,6 +141,7 @@ impl ManiMessage {
             ManiMessage::TransferEndAck => ManiMessageType::TransferEndAck,
             ManiMessage::TransferError(_) => ManiMessageType::TransferError,
             ManiMessage::EndOfStream => ManiMessageType::EndOfStream,
+            ManiMessage::TransferCreditsUpdate(_) => ManiMessageType::TransferCreditsUpdate,
         }
     }
 }

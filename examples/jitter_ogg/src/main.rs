@@ -68,7 +68,18 @@ async fn main() -> anyhow::Result<()> {
 
         let transfer = stream.accept_transfer().await.unwrap();
         let unrel_recv = match transfer {
-            ManiTransferRecvStreams::Dual { unreliable, .. } => unreliable,
+            ManiTransferRecvStreams::Dual {
+                unreliable,
+                mut reliable,
+            } => {
+                tokio::spawn(async move {
+                    while let Some(_packet) = reliable.recv().await {
+                        // pass
+                    }
+                });
+
+                unreliable
+            }
             ManiTransferRecvStreams::UnreliableOnly { unreliable } => unreliable,
         };
 
@@ -94,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         println!("Server: Receiving audio...");
         let mut received_frames = 0;
         loop {
+            println!("Server: Waiting for next PCM frame...");
             match jitter.yield_pcm().await {
                 Ok(Some(pcm)) => {
                     for sample in pcm {
@@ -107,6 +119,10 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
             }
+            println!(
+                "Server: Received frame {}, total frames: {}",
+                received_frames, received_frames
+            );
         }
 
         println!("Server: Finished receiving. Frames: {}", received_frames);
@@ -148,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
 
         timestamp_ms += 20; // Assume 20ms frames for simplicity
         sent_frames += 1;
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     println!(

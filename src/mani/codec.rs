@@ -4,8 +4,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use thiserror::Error;
 
 use crate::mani::message::{
-    ManiHello, ManiMessage, ManiMessageType, ManiNack, ManiPayload, ManiRetrans, TransferEnd,
-    TransferStart,
+    ManiHello, ManiMessage, ManiMessageType, ManiNack, ManiPayload, ManiRetrans,
+    TransferCreditsUpdate, TransferEnd, TransferStart,
 };
 use crate::{SequenceNumber, Timestamp};
 
@@ -38,6 +38,7 @@ pub fn parse_mani_message(bytes: Bytes) -> Result<ManiMessage, ManiMessageParseE
         ManiMessageType::TransferEndAck => Ok(ManiMessage::TransferEndAck),
         ManiMessageType::TransferError => parse_transfer_error_message(&mut cur),
         ManiMessageType::EndOfStream => Ok(ManiMessage::EndOfStream),
+        ManiMessageType::TransferCreditsUpdate => parse_transfer_credits_update_message(&mut cur),
     }
 }
 
@@ -64,6 +65,9 @@ pub fn serialize_mani_message(message: &ManiMessage) -> Bytes {
         }
         ManiMessage::EndOfStream => {
             buf.put_u8(ManiMessageType::EndOfStream as u8);
+        }
+        ManiMessage::TransferCreditsUpdate(credits_update) => {
+            serialize_transfer_credits_update_message(&mut buf, credits_update)
         }
     }
 
@@ -157,6 +161,16 @@ fn parse_transfer_error_message(
     ))
 }
 
+fn parse_transfer_credits_update_message(
+    cur: &mut Cursor<Bytes>,
+) -> Result<ManiMessage, ManiMessageParseError> {
+    let additional_credits = cur.try_get_u32()? as usize;
+
+    Ok(ManiMessage::TransferCreditsUpdate(TransferCreditsUpdate {
+        additional_credits,
+    }))
+}
+
 fn serialize_hello_message(buf: &mut BytesMut, hello: &ManiHello) {
     buf.put_u8(ManiMessageType::Hello as u8);
     buf.put_u8(hello.compression_type as u8);
@@ -198,4 +212,12 @@ fn serialize_transfer_start_message(buf: &mut BytesMut, transfer_start: &Transfe
 fn serialize_transfer_end_message(buf: &mut BytesMut, transfer_end: &TransferEnd) {
     buf.put_u8(ManiMessageType::TransferEnd as u8);
     buf.put_u32(transfer_end.final_sequence_number.0);
+}
+
+fn serialize_transfer_credits_update_message(
+    buf: &mut BytesMut,
+    credits_update: &TransferCreditsUpdate,
+) {
+    buf.put_u8(ManiMessageType::TransferCreditsUpdate as u8);
+    buf.put_u32(credits_update.additional_credits as u32);
 }

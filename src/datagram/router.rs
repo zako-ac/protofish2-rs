@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use quinn::ConnectionError;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::Instant;
 
 use crate::{
@@ -40,9 +40,18 @@ impl DatagramPacketRouter {
 
         // Flush any pending packets for this stream
         if let Some((_, packets)) = self.pending_packets.remove(&stream_id) {
+            tracing::trace!(
+                "Flushing {} pending packets for stream {}",
+                packets.len(),
+                stream_id
+            );
             tokio::spawn(async move {
                 for (_, packet) in packets {
                     if sender.send(packet).await.is_err() {
+                        tracing::debug!(
+                            "Failed to send pending packet to stream {}, stopping flush",
+                            stream_id
+                        );
                         break;
                     }
                 }
@@ -87,15 +96,26 @@ impl DatagramPacketRouter {
         let mut remove_senders = Vec::new();
         if let Some(sender) = self.senders.get(&stream_id) {
             let sequence_number = packet.sequence_number;
-            if let Err(err) = sender.try_send(packet) {
-                remove_senders.push(stream_id);
+            match sender.try_send(packet) {
+                Ok(_) => {
+                    tracing::trace!(
+                        "Routed packet with sequence number {} to stream {}",
+                        sequence_number,
+                        stream_id
+                    );
+                }
+                Err(TrySendError::Full(_)) => {
+                    tracing::error!(
+                        "Tried to send packet with sequence number {} to stream {}, but the channel is full. Dropping packet",
+                        sequence_number,
+                        stream_id
+                    );
 
-                tracing::error!(
-                    "Tried to send packet with sequence number {} to stream {}, to a closed stream: {}",
-                    sequence_number,
-                    stream_id,
-                    err
-                );
+                    // backpressure
+                }
+                Err(TrySendError::Closed(_)) => {
+                    remove_senders.push(stream_id);
+                }
             }
         } else {
             tracing::trace!(

@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use crate::{
     Chunk, ManiStreamId, SequenceNumber, datagram::packet::Packet,
     mani::transfer::assembler::Assembler,
 };
 use tokio::sync::{
+    Notify,
     mpsc::{Receiver, Sender},
     oneshot,
 };
@@ -14,36 +17,42 @@ pub(crate) enum RecvPipelineCommand {
     },
 }
 
+pub(crate) enum RecvSenderCommand {
+    UpdateCredits {
+        additional_credits: usize,
+    },
+    Nack {
+        sequence_numbers: Vec<SequenceNumber>,
+    },
+}
+
 pub struct TransferReliableRecvStream {
     pub id: ManiStreamId,
 
     receiver: Receiver<Packet>,
-    nack_sender: Sender<Vec<SequenceNumber>>,
     assembler: Assembler,
 
+    end_receiver: Arc<Notify>,
+    sender_command_sender: Sender<RecvSenderCommand>,
     command_receiver: Receiver<RecvPipelineCommand>,
     pending_end: Option<(SequenceNumber, oneshot::Sender<()>)>,
-}
-
-pub struct TransferUnreliableRecvStream {
-    pub id: ManiStreamId,
-
-    receiver: Receiver<Packet>,
 }
 
 impl TransferReliableRecvStream {
     pub(crate) fn new(
         id: ManiStreamId,
         receiver: Receiver<Packet>,
-        nack_sender: Sender<Vec<SequenceNumber>>,
         max_retransmission_buffer_size: usize,
+        end_receiver: Arc<Notify>,
         command_receiver: Receiver<RecvPipelineCommand>,
+        sender_command_sender: Sender<RecvSenderCommand>,
     ) -> Self {
         Self {
             id,
             receiver,
-            nack_sender,
             assembler: Assembler::new(max_retransmission_buffer_size),
+            end_receiver,
+            sender_command_sender,
             command_receiver,
             pending_end: None,
         }
@@ -61,6 +70,10 @@ impl TransferReliableRecvStream {
             }
 
             tokio::select! {
+                _ = self.end_receiver.notified() => {
+                    return None; // Signal EOF
+                }
+
                 Some(cmd) = self.command_receiver.recv() => {
                     match cmd {
                         RecvPipelineCommand::EndTransfer { final_sequence_number, reply } => {
@@ -85,7 +98,8 @@ impl TransferReliableRecvStream {
                     let missings = self.assembler.missing_sequence_numbers();
                     #[allow(clippy::collapsible_if)]
                     if !missings.is_empty() {
-                        if let Err(err) = self.nack_sender.send(missings).await {
+                        let command = RecvSenderCommand::Nack { sequence_numbers: missings };
+                        if let Err(err) = self.sender_command_sender.send(command).await {
                             tracing::trace!("Failed to send NACK for missing sequence numbers: {}", err);
                         }
                     }
@@ -100,32 +114,65 @@ impl TransferReliableRecvStream {
     }
 }
 
+pub struct TransferUnreliableRecvStream {
+    pub id: ManiStreamId,
+
+    end_receiver: Arc<Notify>,
+    receiver: Receiver<Packet>,
+}
+
 impl TransferUnreliableRecvStream {
-    pub(crate) fn new(id: ManiStreamId, receiver: Receiver<Packet>) -> Self {
-        Self { id, receiver }
+    pub(crate) async fn new(
+        id: ManiStreamId,
+        receiver: Receiver<Packet>,
+        end_receiver: Arc<Notify>,
+    ) -> Self {
+        Self {
+            id,
+            receiver,
+            end_receiver,
+        }
     }
 
     pub async fn recv(&mut self) -> Option<Chunk> {
-        self.receiver.recv().await.map(Into::into)
+        tokio::select! {
+            _ = self.end_receiver.notified() => {
+                return None; // Signal EOF
+            }
+            packet_opt =  self.receiver.recv() => {
+                let packet = match packet_opt {
+                    Some(c) => c,
+                    None => return None,
+                };
+                Some(packet.into())
+            }
+        }
     }
 }
 
-pub(crate) fn create_stream_pair(
+pub(crate) async fn create_stream_pair(
     id: ManiStreamId,
     receiver1: Receiver<Packet>,
     receiver2: Receiver<Packet>,
-    nack_sender: Sender<Vec<SequenceNumber>>,
+    end_receiver: Arc<Notify>,
+    sender_command_sender: Sender<RecvSenderCommand>,
     max_retransmission_buffer_size: usize,
     command_receiver: Receiver<RecvPipelineCommand>,
 ) -> (TransferReliableRecvStream, TransferUnreliableRecvStream) {
     let reliable_stream = TransferReliableRecvStream::new(
         id,
         receiver1,
-        nack_sender,
         max_retransmission_buffer_size,
+        end_receiver.clone(),
         command_receiver,
+        sender_command_sender.clone(),
     );
-    let unreliable_stream = TransferUnreliableRecvStream::new(id, receiver2);
+    let unreliable_stream = TransferUnreliableRecvStream::new(
+        id,
+        receiver2,
+        end_receiver,
+    )
+    .await;
 
     (reliable_stream, unreliable_stream)
 }

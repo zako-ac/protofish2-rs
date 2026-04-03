@@ -20,6 +20,8 @@ fn generate_cert() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
 
 #[tokio::test]
 async fn test_mani_and_transfer() {
+    let _ = tracing_subscriber::fmt::try_init();
+
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (cert_chain, private_key) = generate_cert();
 
@@ -77,7 +79,7 @@ async fn test_mani_and_transfer() {
             .await
             .expect("Failed to accept transfer");
 
-        let (mut reliable_recv, _unreliable_recv) = match streams {
+        let (mut reliable_recv, mut unreliable_recv) = match streams {
             protofish2::ManiTransferRecvStreams::Dual {
                 reliable,
                 unreliable,
@@ -86,6 +88,13 @@ async fn test_mani_and_transfer() {
                 panic!("Expected dual streams")
             }
         };
+
+        tokio::spawn(async move {
+            // recv unreliable
+            while let Some(_chunk) = unreliable_recv.recv().await {
+                // do nothing
+            }
+        });
 
         let mut received_chunks = 0;
         while let Some(chunks) = reliable_recv.recv().await {
@@ -97,7 +106,7 @@ async fn test_mani_and_transfer() {
                 received_chunks += 1;
             }
         }
-        assert_eq!(received_chunks, 10);
+        assert_eq!(received_chunks, 2000);
     });
 
     let mut client_conn = client
@@ -136,7 +145,7 @@ async fn test_mani_and_transfer() {
         .expect("Failed to start transfer");
 
     // Send 10 chunks
-    for i in 0..10 {
+    for i in 0..2000 {
         send_stream
             .send(Timestamp(i as u64), Bytes::from(format!("chunk {}", i)))
             .await
@@ -151,6 +160,8 @@ async fn test_mani_and_transfer() {
 
 #[tokio::test]
 async fn test_unreliable_only_transfer() {
+    let _ = tracing_subscriber::fmt::try_init();
+
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (cert_chain, private_key) = generate_cert();
 
@@ -178,7 +189,9 @@ async fn test_unreliable_only_transfer() {
 
     let server_task = tokio::spawn(async move {
         let incoming = server.accept().await.expect("No incoming connection");
+
         let mut server_conn = incoming.accept().await.expect("Server failed to accept");
+
         let mut mani_stream = server_conn
             .accept_mani()
             .await

@@ -83,6 +83,7 @@ impl OpusJitterBuffer {
                 }
                 None => {
                     self.is_eof = true;
+                    return Ok(None);
                 }
             }
         }

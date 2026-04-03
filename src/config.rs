@@ -34,6 +34,12 @@ pub struct ManiConfig {
 
     /// Interval at which the pending chunk buffer is cleaned up.
     pub pending_chunk_cleanup_interval: std::time::Duration,
+
+    /// Initial number of backpressure credits granted to the sender.
+    pub initial_backpressure_credits: usize,
+
+    /// Increment of backpressure credits for receiver to send CreditUpdate
+    pub backpressure_credit_batch_size: usize,
 }
 
 impl Default for ManiConfig {
@@ -45,6 +51,8 @@ impl Default for ManiConfig {
             max_chunk_buffer_size: 1000,
             pending_chunk_timeout: std::time::Duration::from_secs(5),
             pending_chunk_cleanup_interval: std::time::Duration::from_secs(1),
+            initial_backpressure_credits: 100,
+            backpressure_credit_batch_size: 10,
         }
     }
 }

@@ -1,0 +1,3 @@
+- [ ] datagram chunking
+- [ ] refactor many params to struct
+- [ ] avoid manual each config passing

@@ -9,7 +9,7 @@ use crate::{
     ManiStreamId, SequenceNumber, Timestamp,
     compression::Compression,
     datagram::packet::{Packet, serialize_packet},
-    mani::message::TransferMode,
+    mani::{message::TransferMode, transfer::backpressure::BackpressureBank},
 };
 
 /// Errors that can occur during a send transfer.
@@ -61,6 +61,7 @@ pub struct TransferSendStream {
     retransmission_buffer: Arc<DashMap<SequenceNumber, Packet>>,
     max_retransmission_buffer_size: usize,
     command_sender: Option<mpsc::Sender<TransferSendCommand>>,
+    backpressure_bank: BackpressureBank,
 }
 
 impl TransferSendStream {
@@ -75,6 +76,7 @@ impl TransferSendStream {
         max_retransmission_buffer_size: usize,
         command_sender: mpsc::Sender<TransferSendCommand>,
         retransmission_buffer: Arc<DashMap<SequenceNumber, Packet>>,
+        backpressure_bank: BackpressureBank,
     ) -> Self {
         Self {
             id,
@@ -85,6 +87,7 @@ impl TransferSendStream {
             retransmission_buffer,
             max_retransmission_buffer_size,
             command_sender: Some(command_sender),
+            backpressure_bank,
         }
     }
 
@@ -138,6 +141,9 @@ impl TransferSendStream {
         }
 
         self.sequence_counter = SequenceNumber(self.sequence_counter.0.wrapping_add(1));
+
+        self.backpressure_bank.wait_for_credit().await;
+        self.backpressure_bank.decrease_credits(1);
 
         Ok(())
     }

@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{Notify, mpsc::Sender};
 
 use bytes::Bytes;
 use tokio::sync::{mpsc::Receiver, oneshot};
@@ -12,12 +12,16 @@ use crate::{
     datagram::{packet::Packet, router::DatagramPacketRouter},
     mani::{
         frame::{ManiReadFrame, ManiWriteFrame},
-        message::{ManiMessage, ManiNack, TransferError, TransferErrorCode, TransferMode},
+        message::{
+            ManiMessage, ManiNack, TransferCreditsUpdate, TransferError, TransferErrorCode,
+            TransferMode,
+        },
         transfer::{
+            backpressure::BackpressureBank,
             compression::CompressedPacketReceiver,
             recv::{
-                RecvPipelineCommand, TransferReliableRecvStream, TransferUnreliableRecvStream,
-                create_stream_pair,
+                RecvPipelineCommand, RecvSenderCommand, TransferReliableRecvStream,
+                TransferUnreliableRecvStream, create_stream_pair,
             },
             send::{TransferSendCommand, TransferSendError, TransferSendStream},
         },
@@ -94,6 +98,7 @@ pub(crate) struct ManiStreamTask {
     pub id: ManiStreamId,
     pub max_retransmission_buffer_size: usize,
     pub max_datagram_channel_size: usize,
+    pub credits_bulk_update_count: usize,
 
     pub writer: ManiWriteFrame<quinn::SendStream>,
     pub reader: ManiReadFrame<quinn::RecvStream>,
@@ -102,12 +107,16 @@ pub(crate) struct ManiStreamTask {
     pub datagram_router: DatagramPacketRouter,
 
     pub quic_connection: quinn::Connection,
+
     role: ManiStreamRole,
     command_receiver: Receiver<ManiStreamCommand>,
     transfer_send_command_receiver: Receiver<TransferSendCommand>,
     transfer_send_command_sender: Sender<TransferSendCommand>,
-    nack_sender: Sender<Vec<SequenceNumber>>,
-    nack_receiver: Receiver<Vec<SequenceNumber>>,
+    sender_command_sender: Sender<RecvSenderCommand>,
+    sender_command_receiver: Receiver<RecvSenderCommand>,
+    end_notify: Arc<Notify>,
+
+    backpressure_bank: BackpressureBank,
 }
 
 impl ManiStreamTask {
@@ -131,13 +140,41 @@ impl ManiStreamTask {
                         break;
                     }
                 }
-                Some(nacks) = self.nack_receiver.recv() => {
-                    let nack_msg = crate::mani::message::ManiMessage::Nack(crate::mani::message::ManiNack { sequence_numbers: nacks });
-                    if let Err(err) = self.writer.write_frame(&nack_msg).await {
-                        tracing::debug!("Failed to send NACK on stream {}: {}", self.id, err);
+                Some(cmd) = self.sender_command_receiver.recv() => {
+                    if !self.handle_sender_command(cmd).await {
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    async fn handle_sender_command(&mut self, command: RecvSenderCommand) -> bool {
+        match command {
+            RecvSenderCommand::UpdateCredits { additional_credits } => {
+                let update_credits_message =
+                    ManiMessage::TransferCreditsUpdate(TransferCreditsUpdate {
+                        additional_credits,
+                    });
+
+                if let Err(err) = self.writer.write_frame(&update_credits_message).await {
+                    tracing::debug!(
+                        "Failed to send TransferCreditsUpdate on stream {}: {}",
+                        self.id,
+                        err
+                    );
+                    return false;
+                }
+
+                true
+            }
+            RecvSenderCommand::Nack { sequence_numbers } => {
+                let nack_message = ManiMessage::Nack(ManiNack { sequence_numbers });
+                if let Err(err) = self.writer.write_frame(&nack_message).await {
+                    tracing::debug!("Failed to send NACK on stream {}: {}", self.id, err);
+                    return false;
+                }
+                true
             }
         }
     }
@@ -179,6 +216,7 @@ impl ManiStreamTask {
                 true
             }
             TransferSendCommand::SendTransferEndAck => {
+                self.end_notify.notify_waiters();
                 if let Err(err) = self.writer.write_frame(&ManiMessage::TransferEndAck).await {
                     tracing::debug!(
                         "Failed to send TransferEndAck on stream {}: {}",
@@ -286,6 +324,20 @@ impl ManiStreamTask {
             return Err(TransferSendError::DatagramSendFailed(err.to_string()));
         }
 
+        // After signaling the end of the transfer, we can send a credits update to help flush any
+        // remaining data through the pipeline.
+        let credits_update_message = ManiMessage::TransferCreditsUpdate(TransferCreditsUpdate {
+            additional_credits: self.credits_bulk_update_count,
+        });
+        if let Err(err) = self.writer.write_frame(&credits_update_message).await {
+            tracing::debug!(
+                "Failed to send TransferCreditsUpdate on stream {}: {}",
+                self.id,
+                err
+            );
+            return Err(TransferSendError::DatagramSendFailed(err.to_string()));
+        }
+
         Ok(ack_rx)
     }
 
@@ -331,6 +383,7 @@ impl ManiStreamTask {
             self.max_retransmission_buffer_size,
             self.transfer_send_command_sender.clone(),
             retransmission_buffer,
+            self.backpressure_bank.clone(),
         ))
     }
 
@@ -351,6 +404,12 @@ impl ManiStreamTask {
                 ManiMessage::TransferEndAck => self.handle_transfer_end_ack().await,
                 ManiMessage::TransferError(transfer_error) => {
                     self.handle_transfer_error(transfer_error).await
+                }
+                ManiMessage::TransferCreditsUpdate(update) => {
+                    self.backpressure_bank
+                        .increase_credits(update.additional_credits);
+
+                    true
                 }
                 _ => {
                     tracing::debug!(
@@ -383,7 +442,13 @@ impl ManiStreamTask {
                 let (pipeline_tx, pipeline_rx) = tokio::sync::mpsc::channel(1);
 
                 let mut compression_receiver =
-                    CompressedPacketReceiver::new(dg_receiver, vec![s1, s2], compression);
+                    CompressedPacketReceiver::new(
+                        dg_receiver,
+                        vec![s1, s2],
+                        compression,
+                        self.sender_command_sender.clone(),
+                        self.credits_bulk_update_count,
+                    );
 
                 tokio::spawn(async move {
                     compression_receiver.run().await;
@@ -393,10 +458,12 @@ impl ManiStreamTask {
                     self.id,
                     r1,
                     r2,
-                    self.nack_sender.clone(),
+                    self.end_notify.clone(),
+                    self.sender_command_sender.clone(),
                     self.max_retransmission_buffer_size,
                     pipeline_rx,
-                );
+                )
+                .await;
 
                 self.role = ManiStreamRole::Receiver {
                     retrans_packet_sender: dg_sender,
@@ -411,13 +478,24 @@ impl ManiStreamTask {
                 let (s1, r1) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
 
                 let mut compression_receiver =
-                    CompressedPacketReceiver::new(dg_receiver, vec![s1], compression);
+                    CompressedPacketReceiver::new(
+                        dg_receiver,
+                        vec![s1],
+                        compression,
+                        self.sender_command_sender.clone(),
+                        self.credits_bulk_update_count,
+                    );
 
                 tokio::spawn(async move {
                     compression_receiver.run().await;
                 });
 
-                let unrel = TransferUnreliableRecvStream::new(self.id, r1);
+                let unrel = TransferUnreliableRecvStream::new(
+                    self.id,
+                    r1,
+                    self.end_notify.clone(),
+                )
+                .await;
 
                 self.role = ManiStreamRole::Receiver {
                     retrans_packet_sender: dg_sender,
@@ -601,6 +679,7 @@ impl ManiStreamTask {
                     });
                 } else {
                     // No pipeline to flush, acknowledge immediately
+                    self.end_notify.notify_waiters();
                     if let Err(err) = self.writer.write_frame(&ManiMessage::TransferEndAck).await {
                         tracing::debug!(
                             "Failed to send TransferEndAck on stream {}: {}",
@@ -670,6 +749,7 @@ impl ManiStreamTask {
 ///
 /// Sending data:
 ///
+///
 /// ```ignore
 /// let mut stream = conn.open_mani().await?;
 /// let transfer = stream.start_transfer(CompressionType::None, SequenceNumber(0), None).await?;
@@ -704,12 +784,14 @@ impl ManiStream {
         max_retransmission_buffer_size: usize,
         max_nack_channel_size: usize,
         max_datagram_channel_size: usize,
+        initial_backpressure_credits: usize,
+        credits_bulk_update_count: usize,
     ) -> (Self, ManiStreamTask) {
         let (message_sender, message_receiver) = tokio::sync::mpsc::channel(100);
         let (command_sender, command_receiver) = tokio::sync::mpsc::channel(100);
         let (transfer_send_command_sender, transfer_send_command_receiver) =
             tokio::sync::mpsc::channel(100);
-        let (nack_sender, nack_receiver) = tokio::sync::mpsc::channel(max_nack_channel_size);
+        let (sc_sender, sc_receiver) = tokio::sync::mpsc::channel(max_nack_channel_size);
 
         let stream = Self {
             id,
@@ -721,17 +803,20 @@ impl ManiStream {
             id,
             max_retransmission_buffer_size,
             max_datagram_channel_size,
+            credits_bulk_update_count,
             writer,
             reader,
             message_sender,
             datagram_router,
             quic_connection,
             role: ManiStreamRole::Unknown,
+            end_notify: Arc::new(Notify::new()),
             command_receiver,
             transfer_send_command_receiver,
             transfer_send_command_sender,
-            nack_sender,
-            nack_receiver,
+            sender_command_sender: sc_sender,
+            sender_command_receiver: sc_receiver,
+            backpressure_bank: BackpressureBank::new(initial_backpressure_credits),
         };
 
         (stream, task)
