@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use crate::{SequenceNumber, Timestamp, compression::CompressionType};
+use crate::{compression::CompressionType, SequenceNumber, Timestamp};
 
 #[derive(Debug, Clone)]
 pub struct ManiHello {
@@ -24,8 +24,26 @@ pub struct ManiRetrans {
     pub payload: Bytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TransferMode {
+    Dual = 0x00,
+    UnreliableOnly = 0x01,
+}
+
+impl TransferMode {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x00 => Some(TransferMode::Dual),
+            0x01 => Some(TransferMode::UnreliableOnly),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferStart {
+    pub mode: TransferMode,
     pub compression_type: CompressionType,
     pub initial_sequence_number: SequenceNumber,
     pub data_size: Option<u64>,

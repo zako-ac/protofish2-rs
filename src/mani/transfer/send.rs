@@ -9,6 +9,7 @@ use crate::{
     ManiStreamId, SequenceNumber, Timestamp,
     compression::Compression,
     datagram::chunk::{Chunk, serialize_chunk},
+    mani::message::TransferMode,
 };
 
 /// Errors that can occur during a send transfer.
@@ -53,6 +54,7 @@ pub(crate) enum TransferSendCommand {
 /// ```
 pub struct TransferSendStream {
     id: ManiStreamId,
+    mode: TransferMode,
     compression: Box<dyn Compression>,
     quic_connection: quinn::Connection,
     sequence_counter: SequenceNumber,
@@ -63,8 +65,10 @@ pub struct TransferSendStream {
 
 impl TransferSendStream {
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: ManiStreamId,
+        mode: TransferMode,
         compression: Box<dyn Compression>,
         quic_connection: quinn::Connection,
         initial_sequence_number: SequenceNumber,
@@ -74,6 +78,7 @@ impl TransferSendStream {
     ) -> Self {
         Self {
             id,
+            mode,
             compression,
             quic_connection,
             sequence_counter: initial_sequence_number,
@@ -105,7 +110,7 @@ impl TransferSendStream {
         timestamp: Timestamp,
         content: Bytes,
     ) -> Result<(), TransferSendError> {
-        if self.retransmission_buffer.len() >= self.max_retransmission_buffer_size {
+        if self.mode == TransferMode::Dual && self.retransmission_buffer.len() >= self.max_retransmission_buffer_size {
             return Err(TransferSendError::RetransmissionBufferFull);
         }
 
@@ -124,8 +129,10 @@ impl TransferSendStream {
             .send_datagram(serialized)
             .map_err(|e| TransferSendError::DatagramSendFailed(e.to_string()))?;
 
-        self.retransmission_buffer
-            .insert(self.sequence_counter, chunk);
+        if self.mode == TransferMode::Dual {
+            self.retransmission_buffer
+                .insert(self.sequence_counter, chunk);
+        }
 
         self.sequence_counter = SequenceNumber(self.sequence_counter.0.wrapping_add(1));
 

@@ -64,8 +64,10 @@
 //!
 //! ```ignore
 //! let mut send_stream = conn.open_mani().await?;
-//! let (reliable_send, unreliable_send) = send_stream.start_transfer(
+//! let mut reliable_send = send_stream.start_transfer(
+//!     protofish2::TransferMode::Dual,
 //!     CompressionType::None,
+//!     protofish2::SequenceNumber(0),
 //!     None,
 //! ).await?;
 //!
@@ -83,5 +85,7 @@ pub mod error;
 
 pub mod types;
 pub use types::*;
+pub use mani::message::TransferMode;
+pub use mani::stream::ManiTransferRecvStreams;
 
 mod datagram;

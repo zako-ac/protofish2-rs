@@ -114,6 +114,7 @@ fn parse_retrans_message(cur: &mut Cursor<Bytes>) -> Result<ManiMessage, ManiMes
 fn parse_transfer_start_message(
     cur: &mut Cursor<Bytes>,
 ) -> Result<ManiMessage, ManiMessageParseError> {
+    let mode_val = cur.try_get_u8()?;
     let compression_type = cur.try_get_u8()?;
     let initial_sequence_number = SequenceNumber(cur.try_get_u32()?);
     let has_data_size = cur.try_get_u8()? != 0;
@@ -124,6 +125,8 @@ fn parse_transfer_start_message(
     };
 
     Ok(ManiMessage::TransferStart(TransferStart {
+        mode: crate::mani::message::TransferMode::from_u8(mode_val)
+            .ok_or(ManiMessageParseError::InvalidMessageFormat)?,
         compression_type: crate::compression::CompressionType::from_u8(compression_type)
             .ok_or(ManiMessageParseError::InvalidMessageFormat)?,
         initial_sequence_number,
@@ -181,6 +184,7 @@ fn serialize_retrans_message(buf: &mut BytesMut, retrans: &ManiRetrans) {
 
 fn serialize_transfer_start_message(buf: &mut BytesMut, transfer_start: &TransferStart) {
     buf.put_u8(ManiMessageType::TransferStart as u8);
+    buf.put_u8(transfer_start.mode as u8);
     buf.put_u8(transfer_start.compression_type as u8);
     buf.put_u32(transfer_start.initial_sequence_number.0);
     if let Some(data_size) = transfer_start.data_size {

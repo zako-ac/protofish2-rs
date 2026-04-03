@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0]
+### Added
+- Added unreliable-only mode.
+
 ## [0.2.1]
 ### Added
 - Added datagram buffering logic.

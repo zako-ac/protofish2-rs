@@ -513,7 +513,7 @@ pub struct ConnectionState {
 /// let mut conn = client.connect(...).await?;
 ///
 /// let mut stream = conn.open_mani().await?;
-/// let (send, recv) = stream.start_transfer(CompressionType::None, None).await?;
+/// let (send, recv) = stream.start_transfer(TransferMode::Dual, CompressionType::None, SequenceNumber(0), None).await?;
 /// send.send(Timestamp(0), Bytes::from("Hello")).await?;
 /// send.end().await?;
 /// ```
@@ -534,7 +534,7 @@ impl ProtofishConnection {
     ///
     /// ```ignore
     /// let mut stream = conn.open_mani().await?;
-    /// let (send, recv) = stream.start_transfer(CompressionType::None, None).await?;
+    /// let send = stream.start_transfer(TransferMode::Dual, CompressionType::None, SequenceNumber(0), None).await?;
     /// ```
     ///
     /// # Errors

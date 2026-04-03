@@ -12,7 +12,7 @@ use crate::{
     datagram::{chunk::Chunk, router::DatagramChunkRouter},
     mani::{
         frame::{ManiReadFrame, ManiWriteFrame},
-        message::{ManiMessage, ManiNack, TransferError, TransferErrorCode},
+        message::{ManiMessage, ManiNack, TransferError, TransferErrorCode, TransferMode},
         transfer::{
             compression::CompressedChunkReceiver,
             recv::{
@@ -32,12 +32,13 @@ enum ManiStreamRole {
     },
     Receiver {
         retrans_chunk_sender: Sender<Chunk>,
-        pipeline_command_sender: Sender<RecvPipelineCommand>,
+        pipeline_command_sender: Option<Sender<RecvPipelineCommand>>,
     },
 }
 
 enum ManiStreamCommand {
     StartTransfer {
+        mode: TransferMode,
         compression: CompressionType,
         initial_sequence_number: SequenceNumber,
         data_size: Option<u64>,
@@ -69,10 +70,21 @@ pub enum ManiStreamError {
     ExpectedTransfer,
 }
 
+/// Received transfer streams
+pub enum ManiTransferRecvStreams {
+    Dual {
+        reliable: TransferReliableRecvStream,
+        unreliable: TransferUnreliableRecvStream,
+    },
+    UnreliableOnly {
+        unreliable: TransferUnreliableRecvStream,
+    },
+}
+
 /// Messages that can be received from a stream.
 pub enum ManiRecvMessage {
     /// An incoming transfer request with reliable and unreliable receivers.
-    Transfer(TransferReliableRecvStream, TransferUnreliableRecvStream),
+    Transfer(ManiTransferRecvStreams),
 
     /// Raw payload data.
     Payload(Bytes),
@@ -183,13 +195,14 @@ impl ManiStreamTask {
     async fn handle_command(&mut self, command: ManiStreamCommand) -> bool {
         match command {
             ManiStreamCommand::StartTransfer {
+                mode,
                 compression,
                 initial_sequence_number,
                 data_size,
                 response,
             } => {
                 let result = self
-                    .start_transfer_internal(compression, initial_sequence_number, data_size)
+                    .start_transfer_internal(mode, compression, initial_sequence_number, data_size)
                     .await;
                 let _ = response.send(result);
                 true
@@ -278,6 +291,7 @@ impl ManiStreamTask {
 
     async fn start_transfer_internal(
         &mut self,
+        mode: TransferMode,
         compression: CompressionType,
         initial_sequence_number: SequenceNumber,
         data_size: Option<u64>,
@@ -290,6 +304,7 @@ impl ManiStreamTask {
             .writer
             .write_frame(&ManiMessage::TransferStart(
                 crate::mani::message::TransferStart {
+                    mode,
                     compression_type: compression,
                     initial_sequence_number,
                     data_size,
@@ -309,6 +324,7 @@ impl ManiStreamTask {
 
         Ok(TransferSendStream::new(
             self.id,
+            mode,
             compression_impl,
             self.quic_connection.clone(),
             initial_sequence_number,
@@ -361,34 +377,56 @@ impl ManiStreamTask {
 
             self.datagram_router.register(self.id, dg_sender.clone());
 
-            let (s1, r1) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
-            let (s2, r2) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
-            let (pipeline_tx, pipeline_rx) = tokio::sync::mpsc::channel(1);
+            let transfer_streams = if transfer_start.mode == TransferMode::Dual {
+                let (s1, r1) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
+                let (s2, r2) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
+                let (pipeline_tx, pipeline_rx) = tokio::sync::mpsc::channel(1);
 
-            let mut compression_receiver =
-                CompressedChunkReceiver::new(dg_receiver, vec![s1, s2], compression);
+                let mut compression_receiver =
+                    CompressedChunkReceiver::new(dg_receiver, vec![s1, s2], compression);
 
-            tokio::spawn(async move {
-                compression_receiver.run().await;
-            });
+                tokio::spawn(async move {
+                    compression_receiver.run().await;
+                });
 
-            let (rel, unrel) = create_stream_pair(
-                self.id,
-                r1,
-                r2,
-                self.nack_sender.clone(),
-                self.max_retransmission_buffer_size,
-                pipeline_rx,
-            );
+                let (rel, unrel) = create_stream_pair(
+                    self.id,
+                    r1,
+                    r2,
+                    self.nack_sender.clone(),
+                    self.max_retransmission_buffer_size,
+                    pipeline_rx,
+                );
 
-            self.role = ManiStreamRole::Receiver {
-                retrans_chunk_sender: dg_sender,
-                pipeline_command_sender: pipeline_tx,
+                self.role = ManiStreamRole::Receiver {
+                    retrans_chunk_sender: dg_sender,
+                    pipeline_command_sender: Some(pipeline_tx),
+                };
+
+                ManiTransferRecvStreams::Dual { reliable: rel, unreliable: unrel }
+            } else {
+                let (s1, r1) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
+
+                let mut compression_receiver =
+                    CompressedChunkReceiver::new(dg_receiver, vec![s1], compression);
+
+                tokio::spawn(async move {
+                    compression_receiver.run().await;
+                });
+
+                let unrel = TransferUnreliableRecvStream::new(self.id, r1);
+
+                self.role = ManiStreamRole::Receiver {
+                    retrans_chunk_sender: dg_sender,
+                    pipeline_command_sender: None,
+                };
+
+                ManiTransferRecvStreams::UnreliableOnly { unreliable: unrel }
             };
 
             if let Err(err) = self
                 .message_sender
-                .send(ManiRecvMessage::Transfer(rel, unrel))
+                .send(ManiRecvMessage::Transfer(transfer_streams))
                 .await
             {
                 tracing::debug!("Failed to send transfer streams to channel: {}", err);
@@ -534,31 +572,43 @@ impl ManiStreamTask {
                     transfer_end.final_sequence_number
                 );
 
-                let (reply_tx, reply_rx) = oneshot::channel();
+                if let Some(pipeline_command_sender) = pipeline_command_sender {
+                    let (reply_tx, reply_rx) = oneshot::channel();
 
-                if let Err(err) = pipeline_command_sender
-                    .send(RecvPipelineCommand::EndTransfer {
-                        final_sequence_number: transfer_end.final_sequence_number,
-                        reply: reply_tx,
-                    })
-                    .await
-                {
-                    tracing::debug!(
-                        "Failed to send EndTransfer to pipeline on stream {}: {}",
-                        self.id,
-                        err
-                    );
-                    return false;
-                }
-
-                let command_sender = self.transfer_send_command_sender.clone();
-                tokio::spawn(async move {
-                    if reply_rx.await.is_ok() {
-                        let _ = command_sender
-                            .send(TransferSendCommand::SendTransferEndAck)
-                            .await;
+                    if let Err(err) = pipeline_command_sender
+                        .send(RecvPipelineCommand::EndTransfer {
+                            final_sequence_number: transfer_end.final_sequence_number,
+                            reply: reply_tx,
+                        })
+                        .await
+                    {
+                        tracing::debug!(
+                            "Failed to send EndTransfer to pipeline on stream {}: {}",
+                            self.id,
+                            err
+                        );
+                        return false;
                     }
-                });
+
+                    let command_sender = self.transfer_send_command_sender.clone();
+                    tokio::spawn(async move {
+                        if reply_rx.await.is_ok() {
+                            let _ = command_sender
+                                .send(TransferSendCommand::SendTransferEndAck)
+                                .await;
+                        }
+                    });
+                } else {
+                    // No pipeline to flush, acknowledge immediately
+                    if let Err(err) = self.writer.write_frame(&ManiMessage::TransferEndAck).await {
+                        tracing::debug!(
+                            "Failed to send TransferEndAck on stream {}: {}",
+                            self.id,
+                            err
+                        );
+                        return false;
+                    }
+                }
 
                 true
             }
@@ -710,7 +760,7 @@ impl ManiStream {
     pub async fn recv_payload(&mut self) -> Result<Bytes, ManiStreamError> {
         match self.recv().await {
             Some(ManiRecvMessage::Payload(bytes)) => Ok(bytes),
-            Some(ManiRecvMessage::Transfer(_, _)) => Err(ManiStreamError::ExpectedPayload),
+            Some(ManiRecvMessage::Transfer(_)) => Err(ManiStreamError::ExpectedPayload),
             None => Err(ManiStreamError::StreamClosed),
         }
     }
@@ -732,9 +782,9 @@ impl ManiStream {
     /// ```
     pub async fn accept_transfer(
         &mut self,
-    ) -> Result<(TransferReliableRecvStream, TransferUnreliableRecvStream), ManiStreamError> {
+    ) -> Result<ManiTransferRecvStreams, ManiStreamError> {
         match self.recv().await {
-            Some(ManiRecvMessage::Transfer(rel, unrel)) => Ok((rel, unrel)),
+            Some(ManiRecvMessage::Transfer(streams)) => Ok(streams),
             Some(ManiRecvMessage::Payload(_)) => Err(ManiStreamError::ExpectedTransfer),
             None => Err(ManiStreamError::StreamClosed),
         }
@@ -763,6 +813,7 @@ impl ManiStream {
     /// Returns an error if the transfer cannot be initiated (e.g., channel failure).
     pub async fn start_transfer(
         &mut self,
+        mode: TransferMode,
         compression: CompressionType,
         initial_sequence_number: SequenceNumber,
         data_size: Option<u64>,
@@ -771,6 +822,7 @@ impl ManiStream {
 
         self.command_sender
             .send(ManiStreamCommand::StartTransfer {
+                mode,
                 compression,
                 initial_sequence_number,
                 data_size,
@@ -872,7 +924,7 @@ mod tests {
 
         let receiver_role = ManiStreamRole::Receiver {
             retrans_chunk_sender: dg_tx,
-            pipeline_command_sender: cmd_tx,
+            pipeline_command_sender: Some(cmd_tx),
         };
         assert!(matches!(receiver_role, ManiStreamRole::Receiver { .. }));
     }
