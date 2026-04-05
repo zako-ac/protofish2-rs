@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::{compression::Compression, datagram::packet::Packet, mani::transfer::recv::RecvSenderCommand};
+use crate::{
+    compression::Compression, datagram::packet::Packet, mani::transfer::recv::RecvSenderCommand,
+};
 
 pub struct CompressedPacketReceiver {
     receiver: mpsc::Receiver<Packet>,
@@ -36,7 +38,7 @@ impl CompressedPacketReceiver {
             let mut any_success = false;
 
             for sender in &self.senders {
-                if let Ok(_) = sender
+                if sender
                     .send(Packet {
                         stream_id: packet.stream_id,
                         sequence_number: packet.sequence_number,
@@ -44,6 +46,7 @@ impl CompressedPacketReceiver {
                         content: Bytes::from(compressed_packet.clone()),
                     })
                     .await
+                    .is_ok()
                 {
                     any_success = true;
                 } else {
@@ -52,7 +55,10 @@ impl CompressedPacketReceiver {
             }
 
             if !any_success && !self.senders.is_empty() {
-                tracing::debug!("All receivers dropped for stream {}, stopping CompressedPacketReceiver", packet.stream_id.0);
+                tracing::debug!(
+                    "All receivers dropped for stream {}, stopping CompressedPacketReceiver",
+                    packet.stream_id.0
+                );
                 break;
             }
 

@@ -26,8 +26,8 @@ pub enum ProtofishConnectionError {
     QuicError(#[from] quinn::ConnectionError),
 
     /// Failed to create or configure the endpoint.
-    #[error("Endpoint error")]
-    EndpointError,
+    #[error("Endpoint error: {0}")]
+    EndpointError(String),
 
     /// The handshake between client and server failed.
     #[error("Handshake failed: {0}")]
@@ -44,6 +44,10 @@ pub enum ProtofishConnectionError {
     /// Failed to read from the QUIC stream.
     #[error("Read Error")]
     ReadError(#[from] quinn::ReadError),
+
+    /// The client exceeded the maximum number of connection retries.
+    #[error("Max retries exceeded")]
+    MaxRetriesExceeded,
 }
 
 /// Configuration for a Protofish2 server.
@@ -126,17 +130,17 @@ impl ProtofishServer {
         let mut server_crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(config.cert_chain.clone(), config.private_key.clone_key())
-            .map_err(|_| ProtofishConnectionError::EndpointError)?;
+            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
 
         server_crypto.alpn_protocols = vec![b"protofish2".to_vec()];
 
         let server_config = quinn::ServerConfig::with_crypto(std::sync::Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-                .map_err(|_| ProtofishConnectionError::EndpointError)?,
+                .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?,
         ));
 
         let endpoint = quinn::Endpoint::server(server_config, config.bind_address)
-            .map_err(|_| ProtofishConnectionError::EndpointError)?;
+            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
 
         Ok(Self {
             endpoint,
@@ -177,6 +181,13 @@ impl ProtofishServer {
             incoming,
             server_config: self.config.clone(),
         })
+    }
+
+    /// Gracefully closes the server endpoint and all its connections.
+    ///
+    /// The `error_code` and `reason` are sent to connected clients.
+    pub fn close(&self, error_code: u32, reason: &[u8]) {
+        self.endpoint.close(error_code.into(), reason);
     }
 }
 
@@ -367,7 +378,7 @@ impl ProtofishClient {
         for cert in &config.root_certificates {
             root_store
                 .add(cert.clone())
-                .map_err(|_| ProtofishConnectionError::EndpointError)?;
+                .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
         }
 
         let mut client_crypto = rustls::ClientConfig::builder()
@@ -378,11 +389,11 @@ impl ProtofishClient {
 
         let client_config = quinn::ClientConfig::new(std::sync::Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
-                .map_err(|_| ProtofishConnectionError::EndpointError)?,
+                .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?,
         ));
 
         let mut endpoint = quinn::Endpoint::client(config.bind_address)
-            .map_err(|_| ProtofishConnectionError::EndpointError)?;
+            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
 
         endpoint.set_default_client_config(client_config);
 
@@ -423,7 +434,7 @@ impl ProtofishClient {
         let conn = self
             .endpoint
             .connect(server_addr, server_name)
-            .map_err(|_| ProtofishConnectionError::EndpointError)?
+            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?
             .await?;
 
         let (send, recv) = conn.open_bi().await?;
@@ -660,7 +671,7 @@ async fn keepalive_task(
                     conn.close(quinn::VarInt::from_u32(1), b"keepalive timeout");
                     break;
                 }
-                if let Err(_) = send.send(ConnectionMessage::Keepalive).await {
+                if send.send(ConnectionMessage::Keepalive).await.is_err() {
                     break;
                 }
             }
@@ -668,7 +679,7 @@ async fn keepalive_task(
                 match msg {
                     Some(Ok(ConnectionMessage::Keepalive)) => {
                         last_activity = tokio::time::Instant::now();
-                        if let Err(_) = send.send(ConnectionMessage::KeepaliveAck).await {
+                        if send.send(ConnectionMessage::KeepaliveAck).await.is_err() {
                             break;
                         }
                     }

@@ -441,14 +441,13 @@ impl ManiStreamTask {
                 let (s2, r2) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
                 let (pipeline_tx, pipeline_rx) = tokio::sync::mpsc::channel(1);
 
-                let mut compression_receiver =
-                    CompressedPacketReceiver::new(
-                        dg_receiver,
-                        vec![s1, s2],
-                        compression,
-                        self.sender_command_sender.clone(),
-                        self.credits_bulk_update_count,
-                    );
+                let mut compression_receiver = CompressedPacketReceiver::new(
+                    dg_receiver,
+                    vec![s1, s2],
+                    compression,
+                    self.sender_command_sender.clone(),
+                    self.credits_bulk_update_count,
+                );
 
                 tokio::spawn(async move {
                     compression_receiver.run().await;
@@ -477,25 +476,20 @@ impl ManiStreamTask {
             } else {
                 let (s1, r1) = tokio::sync::mpsc::channel(self.max_datagram_channel_size);
 
-                let mut compression_receiver =
-                    CompressedPacketReceiver::new(
-                        dg_receiver,
-                        vec![s1],
-                        compression,
-                        self.sender_command_sender.clone(),
-                        self.credits_bulk_update_count,
-                    );
+                let mut compression_receiver = CompressedPacketReceiver::new(
+                    dg_receiver,
+                    vec![s1],
+                    compression,
+                    self.sender_command_sender.clone(),
+                    self.credits_bulk_update_count,
+                );
 
                 tokio::spawn(async move {
                     compression_receiver.run().await;
                 });
 
-                let unrel = TransferUnreliableRecvStream::new(
-                    self.id,
-                    r1,
-                    self.end_notify.clone(),
-                )
-                .await;
+                let unrel =
+                    TransferUnreliableRecvStream::new(self.id, r1, self.end_notify.clone()).await;
 
                 self.role = ManiStreamRole::Receiver {
                     retrans_packet_sender: dg_sender,

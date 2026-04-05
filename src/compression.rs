@@ -39,7 +39,7 @@ impl CompressionType {
     }
 
     /// Creates a boxed compression implementation for the selected type.
-    pub(crate) fn to_boxed_compression(&self) -> Option<Box<dyn Compression>> {
+    pub(crate) fn to_boxed_compression(self) -> Option<Box<dyn Compression>> {
         match self {
             CompressionType::None => Some(Box::new(NoCompression)),
             CompressionType::Gzip => Some(Box::new(GzipCompression)),

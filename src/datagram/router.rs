@@ -82,8 +82,8 @@ impl DatagramPacketRouter {
                             tracing::debug!("Connection closed by peer");
                             break;
                         }
-                        Err(err) => {
-                            tracing::warn!("Failed to read datagram: {}", err);
+                        Err(_err) => {
+                            // Closed
                             break;
                         }
                     }
@@ -123,10 +123,7 @@ impl DatagramPacketRouter {
                 stream_id,
                 packet.sequence_number
             );
-            let mut entry = self
-                .pending_packets
-                .entry(stream_id)
-                .or_insert_with(Vec::new);
+            let mut entry = self.pending_packets.entry(stream_id).or_default();
             if entry.len() < self.max_packet_buffer_size {
                 entry.push((Instant::now(), packet));
             } else {

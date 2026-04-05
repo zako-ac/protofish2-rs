@@ -137,7 +137,7 @@ impl TransferUnreliableRecvStream {
     pub async fn recv(&mut self) -> Option<Chunk> {
         tokio::select! {
             _ = self.end_receiver.notified() => {
-                return None; // Signal EOF
+                None // Signal EOF
             }
             packet_opt =  self.receiver.recv() => {
                 let packet = match packet_opt {

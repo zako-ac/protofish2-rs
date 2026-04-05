@@ -79,6 +79,51 @@ pub struct ProtofishConfig {
     pub mani_config: ManiConfig,
 }
 
+/// Configuration for automatic reconnection behavior.
+///
+/// Controls how the `ReconnectingConnection` handles disconnects and failed
+/// connection attempts.
+///
+/// # Examples
+///
+/// ```
+/// use protofish2::config::ReconnectConfig;
+/// use std::time::Duration;
+///
+/// let config = ReconnectConfig {
+///     initial_backoff: Duration::from_millis(500),
+///     max_backoff: Duration::from_secs(30),
+///     backoff_multiplier: 1.5,
+///     max_retries: Some(5),
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct ReconnectConfig {
+    /// The initial delay before the first retry attempt.
+    pub initial_backoff: std::time::Duration,
+
+    /// The maximum delay between retry attempts.
+    pub max_backoff: std::time::Duration,
+
+    /// The multiplier applied to the delay after each failed attempt.
+    pub backoff_multiplier: f64,
+
+    /// The maximum number of consecutive failed retry attempts before giving up.
+    /// `None` indicates infinite retries.
+    pub max_retries: Option<usize>,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            initial_backoff: std::time::Duration::from_millis(500),
+            max_backoff: std::time::Duration::from_secs(30),
+            backoff_multiplier: 1.5,
+            max_retries: None,
+        }
+    }
+}
+
 impl Default for ProtofishConfig {
     fn default() -> Self {
         Self {
