@@ -130,17 +130,17 @@ impl ProtofishServer {
         let mut server_crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(config.cert_chain.clone(), config.private_key.clone_key())
-            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
+            .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to load server TLS certificates: {}", e)))?;
 
         server_crypto.alpn_protocols = vec![b"protofish2".to_vec()];
 
         let server_config = quinn::ServerConfig::with_crypto(std::sync::Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-                .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?,
+                .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to build QUIC server crypto config: {}", e)))?,
         ));
 
         let endpoint = quinn::Endpoint::server(server_config, config.bind_address)
-            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
+            .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to bind server endpoint to {}: {}", config.bind_address, e)))?;
 
         Ok(Self {
             endpoint,
@@ -378,7 +378,7 @@ impl ProtofishClient {
         for cert in &config.root_certificates {
             root_store
                 .add(cert.clone())
-                .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
+                .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to load root certificate: {}", e)))?;
         }
 
         let mut client_crypto = rustls::ClientConfig::builder()
@@ -389,11 +389,11 @@ impl ProtofishClient {
 
         let client_config = quinn::ClientConfig::new(std::sync::Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
-                .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?,
+                .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to build QUIC client crypto config: {}", e)))?,
         ));
 
         let mut endpoint = quinn::Endpoint::client(config.bind_address)
-            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?;
+            .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to bind client endpoint to {}: {}", config.bind_address, e)))?;
 
         endpoint.set_default_client_config(client_config);
 
@@ -434,7 +434,7 @@ impl ProtofishClient {
         let conn = self
             .endpoint
             .connect(server_addr, server_name)
-            .map_err(|e| ProtofishConnectionError::EndpointError(e.to_string()))?
+            .map_err(|e| ProtofishConnectionError::EndpointError(format!("Failed to connect to server '{}' at {}: {}", server_name, server_addr, e)))?
             .await?;
 
         let (send, recv) = conn.open_bi().await?;
