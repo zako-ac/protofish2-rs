@@ -155,9 +155,8 @@ impl ProtofishServer {
         let quic_idle_timeout = config.protofish_config.keepalive_timeout * 3;
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(Some(
-            quinn::IdleTimeout::try_from(quic_idle_timeout).unwrap_or(quinn::IdleTimeout::from(
-                quinn::VarInt::from_u32(u32::MAX),
-            )),
+            quinn::IdleTimeout::try_from(quic_idle_timeout)
+                .unwrap_or(quinn::IdleTimeout::from(quinn::VarInt::from_u32(u32::MAX))),
         ));
         server_config.transport_config(std::sync::Arc::new(transport));
 
@@ -457,10 +456,10 @@ impl ProtofishClient {
 
         let quic_idle_timeout = config.protofish_config.keepalive_timeout * 3;
         let mut transport = quinn::TransportConfig::default();
+
         transport.max_idle_timeout(Some(
-            quinn::IdleTimeout::try_from(quic_idle_timeout).unwrap_or(quinn::IdleTimeout::from(
-                quinn::VarInt::from_u32(u32::MAX),
-            )),
+            quinn::IdleTimeout::try_from(quic_idle_timeout)
+                .unwrap_or(quinn::IdleTimeout::from(quinn::VarInt::from_u32(u32::MAX))),
         ));
         client_config.transport_config(std::sync::Arc::new(transport));
 
