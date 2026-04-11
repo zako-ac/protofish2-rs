@@ -32,13 +32,27 @@ pub(crate) enum RecvSenderCommand {
 pub struct TransferReliableRecvStream {
     pub id: ManiStreamId,
 
-    receiver: Receiver<Packet>,
+    receiver: Option<Receiver<Packet>>,
     assembler: Assembler,
 
     end_receiver: Arc<Notify>,
     sender_command_sender: Sender<RecvSenderCommand>,
     command_receiver: Receiver<RecvPipelineCommand>,
     pending_end: Option<(SequenceNumber, oneshot::Sender<()>)>,
+}
+
+impl Drop for TransferReliableRecvStream {
+    fn drop(&mut self) {
+        if let Some(mut receiver) = self.receiver.take() {
+            tracing::warn!(
+                stream_id = self.id.0,
+                "TransferReliableRecvStream dropped without consuming all data; draining channel"
+            );
+            tokio::spawn(async move {
+                while receiver.recv().await.is_some() {}
+            });
+        }
+    }
 }
 
 impl TransferReliableRecvStream {
@@ -52,7 +66,7 @@ impl TransferReliableRecvStream {
     ) -> Self {
         Self {
             id,
-            receiver,
+            receiver: Some(receiver),
             assembler: Assembler::new(max_retransmission_buffer_size),
             end_receiver,
             sender_command_sender,
@@ -84,7 +98,7 @@ impl TransferReliableRecvStream {
                         }
                     }
                 }
-                packet_opt = self.receiver.recv() => {
+                packet_opt = self.receiver.as_mut().expect("receiver already taken").recv() => {
                     let packet = match packet_opt {
                         Some(c) => c,
                         None => return None,
@@ -122,7 +136,21 @@ pub struct TransferUnreliableRecvStream {
 
     end_receiver: Arc<Notify>,
     is_end: Arc<AtomicBool>,
-    receiver: Receiver<Packet>,
+    receiver: Option<Receiver<Packet>>,
+}
+
+impl Drop for TransferUnreliableRecvStream {
+    fn drop(&mut self) {
+        if let Some(mut receiver) = self.receiver.take() {
+            tracing::warn!(
+                stream_id = self.id.0,
+                "TransferUnreliableRecvStream dropped without consuming all data; draining channel"
+            );
+            tokio::spawn(async move {
+                while receiver.recv().await.is_some() {}
+            });
+        }
+    }
 }
 
 impl TransferUnreliableRecvStream {
@@ -134,7 +162,7 @@ impl TransferUnreliableRecvStream {
     ) -> Self {
         Self {
             id,
-            receiver,
+            receiver: Some(receiver),
             is_end,
             end_receiver,
         }
@@ -142,17 +170,21 @@ impl TransferUnreliableRecvStream {
 
     pub async fn recv(&mut self) -> Option<Chunk> {
         loop {
-            if self.is_end.load(std::sync::atomic::Ordering::SeqCst) && self.receiver.is_empty() {
+            if self.is_end.load(std::sync::atomic::Ordering::SeqCst)
+                && self.receiver.as_ref().map_or(true, |r| r.is_empty())
+            {
                 return None; // Signal EOF
             }
 
             tokio::select! {
                 _ = self.end_receiver.notified() => {
-                    if self.is_end.load(Ordering::SeqCst) && self.receiver.is_empty() {
+                    if self.is_end.load(Ordering::SeqCst)
+                        && self.receiver.as_ref().map_or(true, |r| r.is_empty())
+                    {
                         return None; // Signal EOF
                     }
                 }
-                packet_opt =  self.receiver.recv() => {
+                packet_opt = self.receiver.as_mut().expect("receiver already taken").recv() => {
                     let packet = match packet_opt {
                         Some(c) => c,
                         None => return None,
