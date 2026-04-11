@@ -37,6 +37,7 @@ enum ManiStreamRole {
     Receiver {
         retrans_packet_sender: Sender<Packet>,
         pipeline_command_sender: Option<Sender<RecvPipelineCommand>>,
+        initial_sequence_number: Option<SequenceNumber>,
     },
 }
 
@@ -484,6 +485,7 @@ impl ManiStreamTask {
                 self.role = ManiStreamRole::Receiver {
                     retrans_packet_sender: dg_sender,
                     pipeline_command_sender: Some(pipeline_tx),
+                    initial_sequence_number: Some(transfer_start.initial_sequence_number),
                 };
 
                 ManiTransferRecvStreams::Dual {
@@ -517,6 +519,7 @@ impl ManiStreamTask {
                 self.role = ManiStreamRole::Receiver {
                     retrans_packet_sender: dg_sender,
                     pipeline_command_sender: None,
+                    initial_sequence_number: Some(transfer_start.initial_sequence_number),
                 };
 
                 ManiTransferRecvStreams::UnreliableOnly { unreliable: unrel }
@@ -653,6 +656,7 @@ impl ManiStreamTask {
         match &self.role {
             ManiStreamRole::Receiver {
                 pipeline_command_sender,
+                initial_sequence_number,
                 ..
             } => {
                 tracing::debug!(
@@ -661,7 +665,30 @@ impl ManiStreamTask {
                     transfer_end.final_sequence_number
                 );
 
-                if let Some(pipeline_command_sender) = pipeline_command_sender {
+                // Check if this is an empty transfer: if final_seq == initial_seq,
+                // no data was sent, so acknowledge immediately without going through the pipeline.
+                let is_empty_transfer = initial_sequence_number
+                    .map(|initial| transfer_end.final_sequence_number == initial)
+                    .unwrap_or(false);
+
+                if is_empty_transfer {
+                    // Empty transfer: send ack immediately
+                    tracing::debug!(
+                        "Received empty TransferEnd on stream {} (final_seq == initial_seq), acknowledging immediately",
+                        self.id
+                    );
+
+                    self.end();
+
+                    if let Err(err) = self.writer.write_frame(&ManiMessage::TransferEndAck).await {
+                        tracing::debug!(
+                            "Failed to send TransferEndAck on stream {}: {}",
+                            self.id,
+                            err
+                        );
+                        return false;
+                    }
+                } else if let Some(pipeline_command_sender) = pipeline_command_sender {
                     let (reply_tx, reply_rx) = oneshot::channel();
 
                     if let Err(err) = pipeline_command_sender
@@ -1026,6 +1053,7 @@ mod tests {
         let receiver_role = ManiStreamRole::Receiver {
             retrans_packet_sender: dg_tx,
             pipeline_command_sender: Some(cmd_tx),
+            initial_sequence_number: None,
         };
         assert!(matches!(receiver_role, ManiStreamRole::Receiver { .. }));
     }

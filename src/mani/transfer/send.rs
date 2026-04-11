@@ -60,6 +60,7 @@ pub struct TransferSendStream {
     mode: TransferMode,
     compression: Box<dyn Compression>,
     quic_connection: quinn::Connection,
+    initial_sequence_number: SequenceNumber,
     sequence_counter: SequenceNumber,
     /// Each logical `send()` call occupies one sequence number.
     /// For fragmented sends all fragment datagrams share that same sequence number.
@@ -91,6 +92,7 @@ impl TransferSendStream {
             mode,
             compression,
             quic_connection,
+            initial_sequence_number,
             sequence_counter: initial_sequence_number,
             retransmission_buffer,
             max_retransmission_buffer_size,
@@ -217,7 +219,13 @@ impl TransferSendStream {
     pub async fn end(&mut self) -> Result<(), TransferSendError> {
         tracing::debug!("Ending transfer with stream ID {}", self.id.0);
 
-        let final_sequence_number = SequenceNumber(self.sequence_counter.0.wrapping_sub(1));
+        // If no data was sent, use initial_sequence_number as the final sequence number.
+        // This signals to the receiver that the transfer is empty and the ack can be sent immediately.
+        let final_sequence_number = if self.sequence_counter != self.initial_sequence_number {
+            SequenceNumber(self.sequence_counter.0.wrapping_sub(1))
+        } else {
+            self.initial_sequence_number
+        };
 
         if let Some(command_sender) = &self.command_sender {
             let (response_tx, response_rx) = oneshot::channel();

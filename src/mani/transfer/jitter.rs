@@ -92,6 +92,10 @@ impl OpusJitterBuffer {
                 }
                 None => {
                     self.is_eof = true;
+                    // If no frames were ever received, there is nothing to play.
+                    if self.next_play_ts.is_none() {
+                        return Ok(None);
+                    }
                 }
             }
         }

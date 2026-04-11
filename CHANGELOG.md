@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.5]
+### Fixed
+- Fixed empty stream hang.
+
 ## [0.6.4]
 ### Added
 - Added automatic draining of closed stream.
