@@ -665,7 +665,7 @@ impl ProtofishConnection {
     ///
     /// Returns an error if the underlying QUIC connection fails to open a stream.
     pub async fn open_mani(
-        &mut self,
+        &self,
     ) -> Result<crate::mani::stream::ManiStream, ProtofishConnectionError> {
         let (send, recv) = self.quic_conn.open_bi().await?;
         let id = crate::ManiStreamId(send.id().index());
@@ -724,7 +724,7 @@ impl ProtofishConnection {
     ///
     /// Returns an error if the underlying QUIC connection fails.
     pub async fn accept_mani(
-        &mut self,
+        &self,
     ) -> Result<crate::mani::stream::ManiStream, ProtofishConnectionError> {
         let (send, recv) = self.quic_conn.accept_bi().await?;
         let id = crate::ManiStreamId(send.id().index());

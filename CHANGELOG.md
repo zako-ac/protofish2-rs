@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.7]
+### Fixed
+- Made connection immutable
+
 ## [0.6.6]
 ### Fixed
 - Fixed 300 seconds timeout.
