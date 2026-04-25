@@ -121,36 +121,95 @@ pub(crate) struct ManiStreamTask {
     is_ended: Arc<AtomicBool>,
 
     backpressure_bank: BackpressureBank,
+    /// Number of TransferEnd messages forwarded to the pipeline that have not yet
+    /// produced a SendTransferEndAck command back to this task.  We must not
+    /// close the writer while this is non-zero even if the ManiStream handle has
+    /// already been dropped.
+    pending_ack_count: usize,
 }
 
 impl ManiStreamTask {
     pub async fn run(mut self) {
         self.role = ManiStreamRole::Unknown;
 
+        // Set to true once the ManiStream handle has been dropped (command_receiver closed).
+        let mut command_receiver_closed = false;
+
         loop {
-            tokio::select! {
-                Some(command) = self.command_receiver.recv() => {
-                    if !self.handle_command(command).await {
-                        break;
+            if command_receiver_closed {
+                // ManiStream handle gone.  Keep running until all pending protocol
+                // work is done before FIN-ing the write side:
+                //
+                // * pending_ack_count > 0  — a spawned task still needs to deliver
+                //   SendTransferEndAck (Dual mode).
+                // * Receiver role, !is_ended — we haven't processed TransferEnd from
+                //   the peer yet, so we haven't sent TransferEndAck (UnreliableOnly).
+                //
+                // For Sender/Unknown roles is_ended is never set, so we use `true`
+                // for that guard (nothing to wait for on those roles).
+                let receiver_waiting = matches!(&self.role, ManiStreamRole::Receiver { .. })
+                    && !self.is_ended.load(std::sync::atomic::Ordering::SeqCst);
+
+                if self.pending_ack_count == 0 && !receiver_waiting {
+                    self.writer.close().await;
+                    break;
+                }
+                tokio::select! {
+                    opt = self.transfer_send_command_receiver.recv() => {
+                        match opt {
+                            Some(cmd) => {
+                                if !self.handle_transfer_send_command(cmd).await {
+                                    break;
+                                }
+                            }
+                            None => {
+                                self.writer.close().await;
+                                break;
+                            }
+                        }
+                    }
+                    message = self.reader.read_frame() => {
+                        if !self.handle_message(message).await {
+                            break;
+                        }
                     }
                 }
-                Some(send_command) = self.transfer_send_command_receiver.recv() => {
-                    if !self.handle_transfer_send_command(send_command).await {
-                        break;
+            } else {
+                tokio::select! {
+                    command_opt = self.command_receiver.recv() => {
+                        match command_opt {
+                            Some(command) => {
+                                if !self.handle_command(command).await {
+                                    break;
+                                }
+                            }
+                            None => {
+                                // ManiStream handle was dropped. Don't close yet if we
+                                // still owe a TransferEndAck to the peer.
+                                command_receiver_closed = true;
+                            }
+                        }
                     }
-                }
-                message = self.reader.read_frame() => {
-                    if !self.handle_message(message).await {
-                        break;
+                    Some(send_command) = self.transfer_send_command_receiver.recv() => {
+                        if !self.handle_transfer_send_command(send_command).await {
+                            break;
+                        }
                     }
-                }
-                Some(cmd) = self.sender_command_receiver.recv() => {
-                    if !self.handle_sender_command(cmd).await {
-                        break;
+                    message = self.reader.read_frame() => {
+                        if !self.handle_message(message).await {
+                            break;
+                        }
+                    }
+                    Some(cmd) = self.sender_command_receiver.recv() => {
+                        if !self.handle_sender_command(cmd).await {
+                            break;
+                        }
                     }
                 }
             }
         }
+
+        self.backpressure_bank.signal_shutdown();
     }
 
     async fn handle_sender_command(&mut self, command: RecvSenderCommand) -> bool {
@@ -220,6 +279,7 @@ impl ManiStreamTask {
                 true
             }
             TransferSendCommand::SendTransferEndAck => {
+                self.pending_ack_count = self.pending_ack_count.saturating_sub(1);
                 self.end();
                 if let Err(err) = self.writer.write_frame(&ManiMessage::TransferEndAck).await {
                     tracing::debug!(
@@ -668,7 +728,10 @@ impl ManiStreamTask {
                 // Check if this is an empty transfer: if final_seq == initial_seq,
                 // no data was sent, so acknowledge immediately without going through the pipeline.
                 let is_empty_transfer = initial_sequence_number
-                    .map(|initial| transfer_end.final_sequence_number == initial)
+                    .map(|initial| {
+                        // Empty transfers use final_seq = initial_seq - 1 (wrapping) as sentinel.
+                        transfer_end.final_sequence_number.0.wrapping_add(1) == initial.0
+                    })
                     .unwrap_or(false);
 
                 if is_empty_transfer {
@@ -706,6 +769,7 @@ impl ManiStreamTask {
                         return false;
                     }
 
+                    self.pending_ack_count += 1;
                     let command_sender = self.transfer_send_command_sender.clone();
                     tokio::spawn(async move {
                         if reply_rx.await.is_ok() {
@@ -861,6 +925,7 @@ impl ManiStream {
             sender_command_sender: sc_sender,
             sender_command_receiver: sc_receiver,
             backpressure_bank: BackpressureBank::new(initial_backpressure_credits),
+            pending_ack_count: 0,
         };
 
         (stream, task)

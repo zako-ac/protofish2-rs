@@ -187,7 +187,11 @@ impl TransferSendStream {
 
         // Backpressure: one credit per datagram sent (credits are per-datagram, not per-send).
         for _ in 0..packets.len() {
-            self.backpressure_bank.wait_for_credit().await;
+            if !self.backpressure_bank.wait_for_credit().await {
+                return Err(TransferSendError::DatagramSendFailed(
+                    "stream closed".to_string(),
+                ));
+            }
             self.backpressure_bank.decrease_credits(1);
         }
 
@@ -224,7 +228,9 @@ impl TransferSendStream {
         let final_sequence_number = if self.sequence_counter != self.initial_sequence_number {
             SequenceNumber(self.sequence_counter.0.wrapping_sub(1))
         } else {
-            self.initial_sequence_number
+            // Signal empty transfer with initial_seq - 1 (wrapping) so it's distinguishable
+            // from a 1-chunk transfer whose final_seq equals initial_seq.
+            SequenceNumber(self.initial_sequence_number.0.wrapping_sub(1))
         };
 
         if let Some(command_sender) = &self.command_sender {

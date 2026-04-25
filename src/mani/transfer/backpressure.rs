@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use tokio::sync::Notify;
@@ -8,8 +8,8 @@ use tokio::sync::Notify;
 #[derive(Debug, Clone)]
 pub struct BackpressureBank {
     credits: Arc<AtomicUsize>,
-
     notify: Arc<Notify>,
+    closed: Arc<AtomicBool>,
 }
 
 impl BackpressureBank {
@@ -17,6 +17,7 @@ impl BackpressureBank {
         Self {
             credits: Arc::new(AtomicUsize::new(initial_credits)),
             notify: Arc::new(Notify::new()),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -32,12 +33,21 @@ impl BackpressureBank {
         self.credits.fetch_sub(amount, Ordering::SeqCst);
     }
 
-    pub async fn wait_for_credit(&self) {
+    pub fn signal_shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Returns `true` if credit was obtained, `false` if the bank was shut down.
+    pub async fn wait_for_credit(&self) -> bool {
         loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return false;
+            }
             let current_credits = self.credits.load(Ordering::SeqCst);
             tracing::trace!("Current credits: {}", current_credits);
             if current_credits > 0 {
-                break;
+                return true;
             }
             self.notify.notified().await;
         }

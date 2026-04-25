@@ -62,4 +62,8 @@ impl<W: AsyncWrite + Unpin> ManiWriteFrame<W> {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(())
     }
+
+    pub async fn close(&mut self) {
+        let _ = self.stream.close().await;
+    }
 }
